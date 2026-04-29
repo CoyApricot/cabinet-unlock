@@ -1,16 +1,21 @@
 exports.handler = async function (event) {
-  /* ── Only allow POST requests ── */
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: 'Method Not Allowed' };
-  }
-
-  /* ── CORS headers — replace with your actual Shopify store URL ── */
-  const ALLOWED_ORIGIN = process.env.SHOPIFY_STORE_URL || '*';
+  /* ── CORS headers ── */
   const headers = {
-    'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Content-Type': 'application/json',
   };
+
+  /* ── Handle CORS preflight request ── */
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
+  }
+
+  /* ── Only allow POST requests ── */
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, headers, body: 'Method Not Allowed' };
+  }
 
   /* ── Parse the email from the request body ── */
   let email;
