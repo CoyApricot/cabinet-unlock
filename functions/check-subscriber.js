@@ -27,84 +27,56 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Email is required' }) };
   }
 
-  const SHOPIFY_STORE   = process.env.SHOPIFY_STORE;
-  const SHOPIFY_TOKEN   = process.env.SHOPIFY_TOKEN;
+  const KLAVIYO_TOKEN = process.env.KLAVIYO_TOKEN;
 
-  if (!SHOPIFY_STORE || !SHOPIFY_TOKEN) {
-    console.error('Missing environment variables');
+  if (!KLAVIYO_TOKEN) {
+    console.error('Missing KLAVIYO_TOKEN environment variable');
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server configuration error' }) };
   }
 
-  /* ── Product titles that grant access ── */
-  const ALLOWED_PRODUCTS = [
-    'paper wonders deluxe',
-    'paper wonders standard',
-    'support the artist',
-  ];
-
-  /* ── Check orders via Storefront API GraphQL ── */
   try {
-    const query = `
-      {
-        orders(first: 20, query: "email:${email} created_at:>=${getThirtyDaysAgo()}") {
-          edges {
-            node {
-              lineItems(first: 10) {
-                edges {
-                  node {
-                    title
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
+    /* ── Look up the profile by email in Klaviyo ── */
+    const url = `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${encodeURIComponent(email)}")&fields[profile]=email,properties`;
 
-    const response = await fetch(`https://${SHOPIFY_STORE}/api/2024-01/graphql.json`, {
-      method: 'POST',
+    const response = await fetch(url, {
       headers: {
-        'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN,
+        'Authorization': `Klaviyo-API-Key ${KLAVIYO_TOKEN}`,
+        'revision': '2024-02-15',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ query }),
     });
 
-    console.log('Storefront API status:', response.status);
+    console.log('Klaviyo response status:', response.status);
 
     if (!response.ok) {
       const text = await response.text();
-      console.error('Storefront API error:', response.status, text);
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Shopify' }) };
+      console.error('Klaviyo API error:', response.status, text);
+      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Klaviyo' }) };
     }
 
     const data = await response.json();
-    console.log('Storefront response:', JSON.stringify(data));
+    console.log('Klaviyo response:', JSON.stringify(data));
 
-    const orders = (data.data && data.data.orders && data.data.orders.edges) || [];
+    const profiles = (data.data) || [];
 
-    /* ── Check if any order contains one of the allowed products ── */
-    const hasAccess = orders.some(function(orderEdge) {
-      const lineItems = (orderEdge.node.lineItems && orderEdge.node.lineItems.edges) || [];
-      return lineItems.some(function(itemEdge) {
-        const title = (itemEdge.node.title || '').toLowerCase();
-        return ALLOWED_PRODUCTS.some(function(allowed) {
-          return title.includes(allowed);
-        });
-      });
+    if (profiles.length === 0) {
+      return { statusCode: 200, headers, body: JSON.stringify({ allowed: false }) };
+    }
+
+    /* ── Check if profile has the active subscriber tag ── */
+    const REQUIRED_TAG = 'appstle_subscription_active_customer';
+
+    const hasTag = profiles.some(function(profile) {
+      const props = profile.attributes && profile.attributes.properties || {};
+      /* Klaviyo stores Shopify tags in the shopify_tags property */
+      const tags = (props.shopify_tags || props.tags || '').toLowerCase();
+      return tags.includes(REQUIRED_TAG.toLowerCase());
     });
 
-    return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasAccess }) };
+    return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasTag }) };
 
   } catch (err) {
     console.error('Unexpected error:', err);
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Internal server error' }) };
   }
 };
-
-function getThirtyDaysAgo() {
-  var d = new Date();
-  d.setDate(d.getDate() - 30);
-  return d.toISOString().split('T')[0];
-}
