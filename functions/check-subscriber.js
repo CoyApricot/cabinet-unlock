@@ -7,17 +7,14 @@ exports.handler = async function (event) {
     'Content-Type': 'application/json',
   };
 
-  /* ── Handle CORS preflight request ── */
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
   }
 
-  /* ── Only allow POST requests ── */
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, headers, body: 'Method Not Allowed' };
   }
 
-  /* ── Parse the email from the request body ── */
   let email;
   try {
     const body = JSON.parse(event.body);
@@ -30,47 +27,84 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Email is required' }) };
   }
 
-  /* ── Pull credentials from Netlify environment variables ── */
-  const APPSTLE_TOKEN = process.env.APPSTLE_TOKEN;
-  const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+  const SHOPIFY_STORE   = process.env.SHOPIFY_STORE;
+  const SHOPIFY_TOKEN   = process.env.SHOPIFY_TOKEN;
 
-  if (!APPSTLE_TOKEN || !SHOPIFY_STORE) {
-    console.error('Missing APPSTLE_TOKEN or SHOPIFY_STORE environment variables');
+  if (!SHOPIFY_STORE || !SHOPIFY_TOKEN) {
+    console.error('Missing environment variables');
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server configuration error' }) };
   }
 
-  /* ── Query Appstle API for active subscriptions by email ── */
-  try {
-    const url = `https://subscription-admin.appstle.com/api/external/v1/subscriptions?email=${encodeURIComponent(email)}&status=ACTIVE`;
+  /* ── Product titles that grant access ── */
+  const ALLOWED_PRODUCTS = [
+    'paper wonders deluxe',
+    'paper wonders standard',
+    'support the artist',
+  ];
 
-    const response = await fetch(url, {
+  /* ── Check orders via Storefront API GraphQL ── */
+  try {
+    const query = `
+      {
+        orders(first: 20, query: "email:${email} created_at:>=${getThirtyDaysAgo()}") {
+          edges {
+            node {
+              lineItems(first: 10) {
+                edges {
+                  node {
+                    title
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(`https://${SHOPIFY_STORE}/api/2024-01/graphql.json`, {
+      method: 'POST',
       headers: {
-        'Authorization': 'Bearer ' + APPSTLE_TOKEN,
-        'X-Store-Domain': SHOPIFY_STORE,
+        'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN,
         'Content-Type': 'application/json',
       },
+      body: JSON.stringify({ query }),
     });
 
-    console.log('Appstle response status:', response.status);
+    console.log('Storefront API status:', response.status);
 
     if (!response.ok) {
       const text = await response.text();
-      console.error('Appstle API error:', response.status, text);
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Appstle' }) };
+      console.error('Storefront API error:', response.status, text);
+      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Shopify' }) };
     }
 
     const data = await response.json();
-    console.log('Appstle response:', JSON.stringify(data));
+    console.log('Storefront response:', JSON.stringify(data));
 
-    /* ── Check if any active subscriptions exist for this email ── */
-    const hasActiveSubscription = Array.isArray(data) ? data.length > 0 :
-      (data.content && data.content.length > 0) ||
-      (data.subscriptions && data.subscriptions.length > 0);
+    const orders = (data.data && data.data.orders && data.data.orders.edges) || [];
 
-    return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasActiveSubscription }) };
+    /* ── Check if any order contains one of the allowed products ── */
+    const hasAccess = orders.some(function(orderEdge) {
+      const lineItems = (orderEdge.node.lineItems && orderEdge.node.lineItems.edges) || [];
+      return lineItems.some(function(itemEdge) {
+        const title = (itemEdge.node.title || '').toLowerCase();
+        return ALLOWED_PRODUCTS.some(function(allowed) {
+          return title.includes(allowed);
+        });
+      });
+    });
+
+    return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasAccess }) };
 
   } catch (err) {
     console.error('Unexpected error:', err);
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Internal server error' }) };
   }
 };
+
+function getThirtyDaysAgo() {
+  var d = new Date();
+  d.setDate(d.getDate() - 30);
+  return d.toISOString().split('T')[0];
+}
