@@ -31,46 +31,43 @@ exports.handler = async function (event) {
   }
 
   /* ── Pull credentials from Netlify environment variables ── */
-  const SHOPIFY_STORE   = process.env.SHOPIFY_STORE;   // e.g. your-store.myshopify.com
-  const SHOPIFY_TOKEN   = process.env.SHOPIFY_TOKEN;   // Admin API access token
-  const REQUIRED_TAG    = process.env.REQUIRED_TAG || 'appstle_subscription_active_customer';
+  const APPSTLE_TOKEN = process.env.APPSTLE_TOKEN;
+  const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
-  if (!SHOPIFY_STORE || !SHOPIFY_TOKEN) {
-    console.error('Missing SHOPIFY_STORE or SHOPIFY_TOKEN environment variables');
+  if (!APPSTLE_TOKEN || !SHOPIFY_STORE) {
+    console.error('Missing APPSTLE_TOKEN or SHOPIFY_STORE environment variables');
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server configuration error' }) };
   }
 
-  /* ── Query Shopify Admin API for the customer ── */
+  /* ── Query Appstle API for active subscriptions by email ── */
   try {
-    const url = `https://${SHOPIFY_STORE}/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}&fields=id,email,tags`;
+    const url = `https://subscription-admin.appstle.com/api/external/v1/subscriptions?email=${encodeURIComponent(email)}&status=ACTIVE`;
 
     const response = await fetch(url, {
       headers: {
-        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+        'Authorization': APPSTLE_TOKEN,
+        'X-Store-Domain': SHOPIFY_STORE,
         'Content-Type': 'application/json',
       },
     });
 
+    console.log('Appstle response status:', response.status);
+
     if (!response.ok) {
-      console.error('Shopify API error:', response.status, await response.text());
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Shopify' }) };
+      const text = await response.text();
+      console.error('Appstle API error:', response.status, text);
+      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Appstle' }) };
     }
 
     const data = await response.json();
-    const customers = data.customers || [];
+    console.log('Appstle response:', JSON.stringify(data));
 
-    /* ── No customer found with that email ── */
-    if (customers.length === 0) {
-      return { statusCode: 200, headers, body: JSON.stringify({ allowed: false }) };
-    }
+    /* ── Check if any active subscriptions exist for this email ── */
+    const hasActiveSubscription = Array.isArray(data) ? data.length > 0 :
+      (data.content && data.content.length > 0) ||
+      (data.subscriptions && data.subscriptions.length > 0);
 
-    /* ── Check if any matching customer has the required tag ── */
-    const hasTag = customers.some(function (customer) {
-      const tags = (customer.tags || '').split(',').map(function (t) { return t.trim().toLowerCase(); });
-      return tags.includes(REQUIRED_TAG.toLowerCase());
-    });
-
-    return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasTag }) };
+    return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasActiveSubscription }) };
 
   } catch (err) {
     console.error('Unexpected error:', err);
