@@ -45,7 +45,7 @@ exports.handler = async function (event) {
 
     const response = await fetch(url, {
       headers: {
-        'Authorization': APPSTLE_TOKEN,
+        'Authorization': 'Bearer ' + APPSTLE_TOKEN,
         'X-Store-Domain': SHOPIFY_STORE,
         'Content-Type': 'application/json',
       },
