@@ -35,7 +35,6 @@ exports.handler = async function (event) {
   }
 
   try {
-    /* ── Look up the profile by email in Klaviyo ── */
     const url = `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${encodeURIComponent(email)}")&fields[profile]=email,properties`;
 
     const response = await fetch(url, {
@@ -46,8 +45,6 @@ exports.handler = async function (event) {
       },
     });
 
-    console.log('Klaviyo response status:', response.status);
-
     if (!response.ok) {
       const text = await response.text();
       console.error('Klaviyo API error:', response.status, text);
@@ -55,22 +52,22 @@ exports.handler = async function (event) {
     }
 
     const data = await response.json();
-    console.log('Klaviyo response:', JSON.stringify(data));
-
-    const profiles = (data.data) || [];
+    const profiles = data.data || [];
 
     if (profiles.length === 0) {
       return { statusCode: 200, headers, body: JSON.stringify({ allowed: false }) };
     }
 
-    /* ── Check if profile has the active subscriber tag ── */
     const REQUIRED_TAG = 'appstle_subscription_active_customer';
 
+    /* ── Shopify Tags is an array e.g. ["appstle_subscription_active_customer"] ── */
     const hasTag = profiles.some(function(profile) {
-      const props = profile.attributes && profile.attributes.properties || {};
-      /* Klaviyo stores Shopify tags in the shopify_tags property */
-      const tags = (props.shopify_tags || props.tags || '').toLowerCase();
-      return tags.includes(REQUIRED_TAG.toLowerCase());
+      const props = (profile.attributes && profile.attributes.properties) || {};
+      const shopifyTags = props['Shopify Tags'] || props['shopify_tags'] || [];
+      const tagsArray = Array.isArray(shopifyTags) ? shopifyTags : [shopifyTags];
+      return tagsArray.some(function(tag) {
+        return tag.toLowerCase() === REQUIRED_TAG.toLowerCase();
+      });
     });
 
     return { statusCode: 200, headers, body: JSON.stringify({ allowed: hasTag }) };
