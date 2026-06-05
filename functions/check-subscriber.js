@@ -58,7 +58,6 @@ exports.handler = async function (event) {
 
     let allowed = false;
     let birthday = null;
-    let birthdayChangeCount = 0;
     let birthdayLocked = false;
 
     profiles.forEach(function (profile) {
@@ -73,7 +72,6 @@ exports.handler = async function (event) {
 
       // ── Birthday fields ──
       if (props['birthday']) birthday = props['birthday'];
-      if (props['birthday_change_count'] !== undefined) birthdayChangeCount = Number(props['birthday_change_count']);
       if (props['birthday_locked']) birthdayLocked = Boolean(props['birthday_locked']);
     });
 
@@ -82,9 +80,8 @@ exports.handler = async function (event) {
       headers,
       body: JSON.stringify({
         allowed,
-        birthday,           // e.g. "06-15" (MM-DD) or null
-        birthdayChangeCount, // 0 or 1
-        birthdayLocked,      // true once they've used their one correction
+        birthday,       // e.g. "06-15" (MM-DD) or null
+        birthdayLocked, // true once birthday is set
       }),
     };
   } catch (err) {
