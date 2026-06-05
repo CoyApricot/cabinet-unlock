@@ -31,14 +31,22 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid birthday format. Expected MM-DD.' }) };
   }
 
-  const KLAVIYO_TOKEN = process.env.KLAVIYO_TOKEN;
+  const KLAVIYO_TOKEN      = process.env.KLAVIYO_TOKEN;
+  const SHOPIFY_STORE      = process.env.SHOPIFY_STORE;
+  const SHOPIFY_ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+
   if (!KLAVIYO_TOKEN) {
-    console.error('Missing KLAVIYO_TOKEN environment variable');
+    console.error('Missing KLAVIYO_TOKEN');
+    return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server configuration error' }) };
+  }
+
+  if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_TOKEN) {
+    console.error('Missing Shopify env vars');
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server configuration error' }) };
   }
 
   try {
-    // ── Step 1: Look up the profile ──
+    // ── Step 1: Look up the Klaviyo profile ──
     const lookupUrl = `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${encodeURIComponent(email)}")&fields[profile]=email,properties`;
     const lookupRes = await fetch(lookupUrl, {
       headers: {
@@ -61,9 +69,9 @@ exports.handler = async function (event) {
       return { statusCode: 403, headers, body: JSON.stringify({ error: 'Profile not found' }) };
     }
 
-    const profile     = profiles[0];
-    const profileId   = profile.id;
-    const props       = (profile.attributes && profile.attributes.properties) || {};
+    const profile   = profiles[0];
+    const profileId = profile.id;
+    const props     = (profile.attributes && profile.attributes.properties) || {};
 
     const currentChangeCount = Number(props['birthday_change_count'] || 0);
     const currentLocked      = Boolean(props['birthday_locked']);
@@ -73,22 +81,15 @@ exports.handler = async function (event) {
       return {
         statusCode: 403,
         headers,
-        body: JSON.stringify({
-          error: 'locked',
-          birthday: props['birthday'],
-        }),
+        body: JSON.stringify({ error: 'locked', birthday: props['birthday'] }),
       };
     }
 
-    const newChangeCount = currentChangeCount + 1;
-    const nowLocked      = newChangeCount >= 1; // locked after first correction (second total write)
-
-    // First write: birthday not set yet → just save, don't lock yet
-    // Second write: birthday exists → this is their one correction → lock after
     const isFirstWrite = !props['birthday'];
-    const shouldLock   = !isFirstWrite; // lock on any write after the first
+    const shouldLock   = !isFirstWrite;
+    const newChangeCount = currentChangeCount + 1;
 
-    // ── Step 3: Update the profile ──
+    // ── Step 3: Save birthday to Klaviyo ──
     const updateUrl = `https://a.klaviyo.com/api/profiles/${profileId}/`;
     const updateRes = await fetch(updateUrl, {
       method: 'PATCH',
@@ -115,7 +116,58 @@ exports.handler = async function (event) {
     if (!updateRes.ok) {
       const text = await updateRes.text();
       console.error('Klaviyo update error:', updateRes.status, text);
-      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Failed to update profile' }) };
+      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Failed to update Klaviyo profile' }) };
+    }
+
+    // ── Step 4: Check if birthday month matches current month ──
+    const birthdayMonth = parseInt(birthday.split('-')[0], 10);
+    const currentMonth  = new Date().getMonth() + 1; // 1-12
+    const isBirthdayMonth = birthdayMonth === currentMonth;
+
+    if (isBirthdayMonth) {
+      // ── Step 5: Look up Shopify customer by email ──
+      const shopifySearchUrl = `https://${SHOPIFY_STORE}/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}&fields=id,email,tags`;
+      const shopifySearchRes = await fetch(shopifySearchUrl, {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!shopifySearchRes.ok) {
+        const text = await shopifySearchRes.text();
+        console.error('Shopify customer search error:', shopifySearchRes.status, text);
+        // Don't fail the whole request — Klaviyo save succeeded
+      } else {
+        const shopifyData = await shopifySearchRes.json();
+        const customers   = shopifyData.customers || [];
+
+        if (customers.length > 0) {
+          const customer      = customers[0];
+          const existingTags  = customer.tags ? customer.tags.split(', ').map(t => t.trim()) : [];
+
+          // Add birthday tag if not already present
+          if (!existingTags.includes('birthday')) {
+            const newTags      = [...existingTags, 'birthday'].join(', ');
+            const shopifyUpdateUrl = `https://${SHOPIFY_STORE}/admin/api/2024-01/customers/${customer.id}.json`;
+            const shopifyUpdateRes = await fetch(shopifyUpdateUrl, {
+              method: 'PUT',
+              headers: {
+                'X-Shopify-Access-Token': SHOPIFY_ADMIN_TOKEN,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ customer: { id: customer.id, tags: newTags } }),
+            });
+
+            if (!shopifyUpdateRes.ok) {
+              const text = await shopifyUpdateRes.text();
+              console.error('Shopify tag update error:', shopifyUpdateRes.status, text);
+            } else {
+              console.log(`[birthday] Tagged Shopify customer ${customer.id} (${email})`);
+            }
+          }
+        }
+      }
     }
 
     return {
@@ -124,8 +176,9 @@ exports.handler = async function (event) {
       body: JSON.stringify({
         success: true,
         birthday,
-        birthdayLocked: shouldLock,
+        birthdayLocked:      shouldLock,
         birthdayChangeCount: newChangeCount,
+        taggedInShopify:     isBirthdayMonth,
       }),
     };
   } catch (err) {
