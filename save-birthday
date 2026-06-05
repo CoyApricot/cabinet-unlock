@@ -1,0 +1,135 @@
+exports.handler = async function (event) {
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Content-Type': 'application/json',
+  };
+
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
+  }
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, headers, body: 'Method Not Allowed' };
+  }
+
+  let email, birthday;
+  try {
+    const body = JSON.parse(event.body);
+    email    = (body.email || '').trim().toLowerCase();
+    birthday = (body.birthday || '').trim(); // Expected format: "MM-DD"
+  } catch {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid request body' }) };
+  }
+
+  if (!email) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: 'Email is required' }) };
+  }
+
+  // ── Validate MM-DD format ──
+  if (!/^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(birthday)) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid birthday format. Expected MM-DD.' }) };
+  }
+
+  const KLAVIYO_TOKEN = process.env.KLAVIYO_TOKEN;
+  if (!KLAVIYO_TOKEN) {
+    console.error('Missing KLAVIYO_TOKEN environment variable');
+    return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server configuration error' }) };
+  }
+
+  try {
+    // ── Step 1: Look up the profile ──
+    const lookupUrl = `https://a.klaviyo.com/api/profiles/?filter=equals(email,"${encodeURIComponent(email)}")&fields[profile]=email,properties`;
+    const lookupRes = await fetch(lookupUrl, {
+      headers: {
+        'Authorization': `Klaviyo-API-Key ${KLAVIYO_TOKEN}`,
+        'revision': '2024-02-15',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!lookupRes.ok) {
+      const text = await lookupRes.text();
+      console.error('Klaviyo lookup error:', lookupRes.status, text);
+      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Could not reach Klaviyo' }) };
+    }
+
+    const lookupData = await lookupRes.json();
+    const profiles   = lookupData.data || [];
+
+    if (profiles.length === 0) {
+      return { statusCode: 403, headers, body: JSON.stringify({ error: 'Profile not found' }) };
+    }
+
+    const profile     = profiles[0];
+    const profileId   = profile.id;
+    const props       = (profile.attributes && profile.attributes.properties) || {};
+
+    const currentChangeCount = Number(props['birthday_change_count'] || 0);
+    const currentLocked      = Boolean(props['birthday_locked']);
+
+    // ── Step 2: Enforce lock ──
+    if (currentLocked) {
+      return {
+        statusCode: 403,
+        headers,
+        body: JSON.stringify({
+          error: 'locked',
+          birthday: props['birthday'],
+        }),
+      };
+    }
+
+    const newChangeCount = currentChangeCount + 1;
+    const nowLocked      = newChangeCount >= 1; // locked after first correction (second total write)
+
+    // First write: birthday not set yet → just save, don't lock yet
+    // Second write: birthday exists → this is their one correction → lock after
+    const isFirstWrite = !props['birthday'];
+    const shouldLock   = !isFirstWrite; // lock on any write after the first
+
+    // ── Step 3: Update the profile ──
+    const updateUrl = `https://a.klaviyo.com/api/profiles/${profileId}/`;
+    const updateRes = await fetch(updateUrl, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Klaviyo-API-Key ${KLAVIYO_TOKEN}`,
+        'revision': '2024-02-15',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        data: {
+          type: 'profile',
+          id: profileId,
+          attributes: {
+            properties: {
+              birthday:              birthday,
+              birthday_change_count: newChangeCount,
+              birthday_locked:       shouldLock,
+            },
+          },
+        },
+      }),
+    });
+
+    if (!updateRes.ok) {
+      const text = await updateRes.text();
+      console.error('Klaviyo update error:', updateRes.status, text);
+      return { statusCode: 502, headers, body: JSON.stringify({ error: 'Failed to update profile' }) };
+    }
+
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        success: true,
+        birthday,
+        birthdayLocked: shouldLock,
+        birthdayChangeCount: newChangeCount,
+      }),
+    };
+  } catch (err) {
+    console.error('Unexpected error:', err);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: 'Internal server error' }) };
+  }
+};
