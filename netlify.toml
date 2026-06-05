@@ -1,2 +1,4 @@
 [functions]
   directory = "functions"
+[functions."clear-birthday-tags"]
+  schedule = "0 0 1 * *"
