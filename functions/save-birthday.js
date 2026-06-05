@@ -73,21 +73,14 @@ exports.handler = async function (event) {
     const profileId = profile.id;
     const props     = (profile.attributes && profile.attributes.properties) || {};
 
-    const currentChangeCount = Number(props['birthday_change_count'] || 0);
-    const currentLocked      = Boolean(props['birthday_locked']);
-
-    // ── Step 2: Enforce lock ──
-    if (currentLocked) {
+    // ── Step 2: Enforce lock — birthday can only be set once ──
+    if (props['birthday']) {
       return {
         statusCode: 403,
         headers,
         body: JSON.stringify({ error: 'locked', birthday: props['birthday'] }),
       };
     }
-
-    const isFirstWrite = !props['birthday'];
-    const shouldLock   = !isFirstWrite;
-    const newChangeCount = currentChangeCount + 1;
 
     // ── Step 3: Save birthday to Klaviyo ──
     const updateUrl = `https://a.klaviyo.com/api/profiles/${profileId}/`;
@@ -104,9 +97,8 @@ exports.handler = async function (event) {
           id: profileId,
           attributes: {
             properties: {
-              birthday:              birthday,
-              birthday_change_count: newChangeCount,
-              birthday_locked:       shouldLock,
+              birthday:        birthday,
+              birthday_locked: true,
             },
           },
         },
@@ -176,9 +168,8 @@ exports.handler = async function (event) {
       body: JSON.stringify({
         success: true,
         birthday,
-        birthdayLocked:      shouldLock,
-        birthdayChangeCount: newChangeCount,
-        taggedInShopify:     isBirthdayMonth,
+        birthdayLocked:  true,
+        taggedInShopify: isBirthdayMonth,
       }),
     };
   } catch (err) {
